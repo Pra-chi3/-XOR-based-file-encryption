@@ -74,10 +74,10 @@ string key_str = read_file(key_path);
 char key[key_str.size() + 1];
 strcpy(key, key_str.c_str());
 
-string encrypted = XOR(input_content, key);
+string output = XOR(input_content, key);
 
 size_t checksum = hash_digest(input_content);
-string final_output = to_string(checksum)+"\n"+encrypted;
+string final_output = to_string(checksum)+"\n"+output;
 
 zero_out_key(key, sizeof(key));
 write_file(output_path, final_output);
