@@ -1,5 +1,4 @@
-# -XOR-based-file-encryption
-# MyCipherProject 🚀  
+# -XOR-based-file-encryption 
 
 ### About  
 It’s a simple command-line tool that takes an input file, encrypts or decrypts it, and saves the output.  
