@@ -7,7 +7,7 @@ It’s a simple command-line tool that takes an input file, encrypts or decrypts
 
 ### 📂 Project Structure  
 ```
-MyCipherProject/
+MyProject/
 ├── xor_encrypt.exe        # Compiles the project
 ├── xor_cypher.cpp         # Handles command-line input & runs the cipher
 ├── input.txt              # input text
