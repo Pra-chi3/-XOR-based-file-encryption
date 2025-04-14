@@ -29,19 +29,24 @@ This compiles everything and creates an executable called **xor_encrypt.exe**.
 ```
 Run the program
 <br>
+<br>
 input.txt
+<br>
 ![alt text](image.png)
 <br>
 key.txt
+<br>
 ![alt text](image-1.png)
 <br>
 CLI (without tampering the output.txt)
 ![alt text](image-2.png)
 <br>
 output.txt (after encryption)
+<br>
 ![alt text](image-3.png)
 <br>
 output.txt (after decryption)
+<br>
 ![alt text](image-4.png)
 <br>
 CLI (tampering the output.txt)
