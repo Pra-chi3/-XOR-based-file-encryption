@@ -1,6 +1,4 @@
-from typing import Literal, Annotated
-from typing_extensions import TypedDict
-
+from typing import Literal, Annotated, TypedDict
 from pydantic import BaseModel, Field
 
 from langchain_core.messages import HumanMessage, AIMessage
@@ -11,148 +9,134 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 
 
-# -------------------------------------------------------------------------
+# ────────────────────────────────────────────────
 #   Router Decision Schema
-# -------------------------------------------------------------------------
+# ────────────────────────────────────────────────
 class RouteDecision(BaseModel):
-    """Decide which agent should handle the current user query"""
+    """Decide which specialized agent should handle the query"""
     next_agent: Literal["sql_agent", "wiki_agent", "clarify"] = Field(
-        description="Which specialized agent should process this query"
+        description="Which agent should process this query"
     )
-    reasoning: str = Field(
-        description="Short explanation of the routing decision"
-    )
-    # Optional parameters - useful especially for sql_agent
-    time_period: str = Field(default="", description="Detected time period if mentioned")
-    main_topic: str = Field(default="", description="Main subject/entity of the question")
+    reasoning: str = Field(description="Short explanation why you chose this agent")
 
 
-# -------------------------------------------------------------------------
-#   Graph State
-# -------------------------------------------------------------------------
+# ────────────────────────────────────────────────
+#   State
+# ────────────────────────────────────────────────
 class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
-    decision: RouteDecision | None
     final_answer: str | None
+    decision: RouteDecision | None
 
 
-# -------------------------------------------------------------------------
-#   LLM & Router Setup
-# -------------------------------------------------------------------------
+# ────────────────────────────────────────────────
+#   LLM & Router setup
+# ────────────────────────────────────────────────
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
 router_prompt = ChatPromptTemplate.from_messages([
-    ("system", """You are a smart router between two specialized agents:
+    ("system", """You are an intelligent router between two specialized agents:
 
-1. sql_agent     → questions that require data from database:
-   - metrics, counts, sums, averages
-   - filters, time periods, trends
-   - "how many", "what is the total", "show me", "list", "top", "last month/year"
-   - any question that needs real numbers or records
+1. sql_agent     → database questions, SQL generation, filtering data, aggregations,
+                  counts, trends, business metrics, "how many", "what is the total",
+                  "top 10", "average", "group by", any question that needs database
 
-2. wiki_agent    → general knowledge questions:
-   - definitions, explanations, concepts
-   - who/what/when/where/why/how
-   - history, science, geography, biographies
-   - comparisons, trivia, general facts
+2. wiki_agent    → general knowledge, explanations, definitions, history,
+                  science, geography, biographies, "what is", "who is", "how does",
+                  comparisons, concepts, trivia
 
-3. clarify       → ambiguous, too vague, mixed intent, or doesn't clearly fit above
+3. clarify       → question is too vague / ambiguous / doesn't clearly belong to above
 
-Be conservative: when in doubt → choose 'clarify'
-Most business, analytics, reporting questions should go to sql_agent."""),
+Choose very carefully — most business/reporting/analytics questions should go to sql_agent."""),
     ("placeholder", "{messages}"),
 ])
 
 router_chain = router_prompt | llm.with_structured_output(RouteDecision)
 
 
-# -------------------------------------------------------------------------
-#   Nodes
-# -------------------------------------------------------------------------
+# ────────────────────────────────────────────────
+#   Router Node
+# ────────────────────────────────────────────────
 def router_node(state: AgentState) -> dict:
-    """Classify user intent and decide next step"""
     decision: RouteDecision = router_chain.invoke(state["messages"])
 
-    # Optional: add routing decision to conversation (helps debugging)
-    routing_msg = AIMessage(
-        content=f"[Router] → {decision.next_agent}\nReason: {decision.reasoning}"
-    )
-    
+    # Optional: show decision in conversation (good for debugging)
+    state["messages"].append(AIMessage(content=f"Router → {decision.next_agent}\nReason: {decision.reasoning}"))
+
     return {
         "decision": decision,
-        "messages": state["messages"] + [routing_msg]
+        "messages": state["messages"]
     }
 
 
+# ────────────────────────────────────────────────
+#   Agent Wrappers
+#   (replace with your actual agent executors)
+# ────────────────────────────────────────────────
 def sql_agent_node(state: AgentState) -> dict:
-    """Execute SQL / Database agent"""
-    # In real system → call your actual SQL agent here
-    original_question = state["messages"][0].content
-    
-    # Example placeholder result
-    simulated_output = (
-        f"SQL Agent executed for: {original_question}\n\n"
-        f"→ Generated SQL query\n"
-        f"→ Fetched data from database\n"
-        f"→ Formatted answer with explanation"
-    )
-    
-    return {"final_answer": simulated_output}
+    # Your real SQL agent here
+    # agent_executor = create_SQL_agent(llm, tools)
+
+    message = state["messages"][0].content  # original user question
+
+    # result = agent_executor.invoke({"input": message})
+    # simulated:
+    result = {
+        "output": f"SQL Agent result for: {message}\n"
+                  f"(executed query, returned data, explanation...)"
+    }
+
+    return {"final_answer": result["output"]}
 
 
 def wiki_agent_node(state: AgentState) -> dict:
-    """Execute Wiki / General Knowledge agent"""
-    # In real system → call your actual wiki/general agent here
-    original_question = state["messages"][0].content
-    
-    # Example placeholder
-    simulated_output = (
-        f"Knowledge/Wiki answer for: {original_question}\n\n"
-        f"→ Relevant explanation\n"
-        f"→ Key facts\n"
-        f"→ Sources/context"
-    )
-    
-    return {"final_answer": simulated_output}
+    # Your real wiki/general agent here
+    # agent_executor = create_wiki_agent(llm, tools)
+
+    message = state["messages"][0].content
+
+    # result = agent_executor.invoke({"input": message})
+    # simulated:
+    result = {
+        "output": f"Wiki / Knowledge result for: {message}\n"
+                  f"(summary, explanation, facts...)"
+    }
+
+    return {"final_answer": result["output"]}
 
 
 def clarify_node(state: AgentState) -> dict:
-    """Ask user to clarify intent"""
-    clarification_text = (
-        "I'm not sure whether your question is about:\n\n"
-        "• **Database / numbers / reports / metrics**  (sales, counts, trends, etc.)\n"
-        "• **General knowledge / explanation / definition**  (concepts, facts, history)\n\n"
-        "Please reply with one of these to help me choose the right tool:\n"
-        "• database / data / numbers / report\n"
-        "• knowledge / explanation / general / definition\n\n"
-        "Or just rephrase your question with more context. Thank you! 😊"
-    )
-    
-    return {"final_answer": clarification_text}
+    return {
+        "final_answer": "I'm not sure whether this question should be answered with SQL/database "
+                        "or general knowledge.\n\n"
+                        "Could you clarify if you're asking about:\n"
+                        "• data from database / reports / metrics\n"
+                        "• or general information / explanation / definition?"
+    }
 
 
-# -------------------------------------------------------------------------
-#   Routing Logic
-# -------------------------------------------------------------------------
-def route_decision(state: AgentState) -> Literal["sql_agent", "wiki_agent", "clarify"]:
+# ────────────────────────────────────────────────
+#   Routing function
+# ────────────────────────────────────────────────
+def route_after_router(state: AgentState) -> Literal["sql_agent", "wiki_agent", "clarify"]:
     return state["decision"].next_agent
 
 
-# -------------------------------------------------------------------------
-#   Build & Compile Graph
-# -------------------------------------------------------------------------
-workflow = StateGraph(state_schema=AgentState)
+# ────────────────────────────────────────────────
+#   Build Graph
+# ────────────────────────────────────────────────
+workflow = StateGraph(AgentState)
 
 workflow.add_node("router", router_node)
 workflow.add_node("sql_agent", sql_agent_node)
 workflow.add_node("wiki_agent", wiki_agent_node)
 workflow.add_node("clarify", clarify_node)
 
-# Flow
 workflow.add_edge(START, "router")
+
 workflow.add_conditional_edges(
     "router",
-    route_decision,
+    route_after_router,
     {
         "sql_agent": "sql_agent",
         "wiki_agent": "wiki_agent",
@@ -160,31 +144,32 @@ workflow.add_conditional_edges(
     }
 )
 
-# All terminal nodes go to END
 workflow.add_edge("sql_agent", END)
 workflow.add_edge("wiki_agent", END)
 workflow.add_edge("clarify", END)
 
-# Compile the graph
 graph = workflow.compile()
 
 
-# -------------------------------------------------------------------------
-#   Helper to run the graph
-# -------------------------------------------------------------------------
+# ────────────────────────────────────────────────
+#   Quick usage example
+# ────────────────────────────────────────────────
 def ask(question: str):
     result = graph.invoke({
         "messages": [HumanMessage(content=question)],
-        "decision": None,
-        "final_answer": None
+        "final_answer": None,
+        "decision": None
     })
     return result["final_answer"]
 
 
-# -------------------------------------------------------------------------
-#   Quick tests
-# -------------------------------------------------------------------------
+# Test cases
 if __name__ == "__main__":
-    print("Test 1:", ask("How many customers registered in December 2025?"))
-    print("\nTest 2:", ask("What is the difference between INNER JOIN and LEFT JOIN?"))
-    print("\nTest 3:", ask("Can you help me please?"))
+    print(ask("How many orders were placed last month?"))
+    # → sql_agent
+
+    print(ask("What is the capital of Iceland?"))
+    # → wiki_agent
+
+    print(ask("Can you help me?"))
+    # → clarify
