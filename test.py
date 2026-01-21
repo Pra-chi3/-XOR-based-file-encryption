@@ -193,3 +193,175 @@ if __name__ == "__main__":
     print(ask("How many customers signed up last month?"))
     # print(ask("What is photosynthesis?"))
     # print(ask("Hi how are you?"))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+from typing import Any, Dict, List, Optional, Union
+
+from langchain_core.callbacks import CallbackManagerForLLMRun
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.pydantic_v1 import Field
+
+import httpx
+import json
+
+
+class CustomGenFactoryChat(BaseChatModel):
+    """
+    Minimal custom chat model for your internal GenFactory endpoint.
+    Adjust payload / headers / parsing as needed.
+    """
+
+    # ── Required / strongly recommended fields ──
+    base_url: str = Field(..., description="Base URL of the API")
+    api_key: str = Field(..., description="API key (if required)")
+    model_name: str = Field(..., alias="model")  # allows model=... in constructor
+
+    temperature: float = 0.2
+    max_tokens: Optional[int] = 2048
+
+    # You can add your own fields
+    default_system: Optional[str] = None   # optional forced system prompt
+
+    # Internal http client (can be passed or created here)
+    http_client: Optional[httpx.Client] = None
+
+    def __init__(self, **data: Any):
+        super().__init__(**data)
+        if self.http_client is None:
+            self.http_client = httpx.Client(
+                timeout=httpx.Timeout(60.0, connect=15.0, read=90.0),
+                # proxies=..., http2=..., etc.
+            )
+
+    @property
+    def _llm_type(self) -> str:
+        return "genfactory-custom-chat"
+
+    @property
+    def _identifying_params(self) -> Dict[str, Any]:
+        return {
+            "model": self.model_name,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "base_url": self.base_url,
+        }
+
+    def _create_payload(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        **kwargs: Any,
+    ) -> Dict:
+        # ── Turn LangChain messages → your endpoint format ──
+        payload_messages = []
+
+        # Optional: inject fixed system prompt
+        if self.default_system:
+            payload_messages.append({"role": "system", "content": self.default_system})
+
+        for msg in messages:
+            if isinstance(msg, SystemMessage):
+                role = "system"
+            elif isinstance(msg, HumanMessage):
+                role = "user"
+            elif isinstance(msg, AIMessage):
+                role = "assistant"
+            elif isinstance(msg, ToolMessage):
+                role = "tool"
+            else:
+                role = "user"  # fallback
+
+            content = msg.content
+            # You can add .tool_calls handling here if needed
+
+            payload_messages.append({"role": role, "content": content})
+
+        payload = {
+            "model": self.model_name,
+            "messages": payload_messages,
+            "temperature": kwargs.get("temperature", self.temperature),
+            "max_tokens": kwargs.get("max_tokens", self.max_tokens),
+        }
+
+        if stop:
+            payload["stop"] = stop
+
+        # Add any extra fixed fields your endpoint requires
+        # payload["top_p"] = 0.95
+        # payload["stream"] = False
+
+        return payload
+
+    def _generate(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        payload = self._create_payload(messages, stop=stop, **kwargs)
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            # Add any custom headers your proxy requires
+            # "X-Custom-Header": "value",
+        }
+
+        try:
+            response = self.http_client.post(
+                f"{self.base_url.rstrip('/')}/chat/completions",
+                json=payload,
+                headers=headers,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            # ── Adapt your endpoint's response shape here ──
+            # Most common patterns:
+            content = data["choices"][0]["message"]["content"]
+            # or: data["choices"][0]["delta"]["content"]  (if mistaken for stream)
+            # or: data["response"] / data["text"] / ...
+
+            message = AIMessage(content=content)
+
+            # If your endpoint returns tool_calls / usage / finish_reason:
+            # message.tool_calls = ... 
+            # generation_info = {"finish_reason": ..., "usage": ...}
+
+            generation = ChatGeneration(message=message)  # , generation_info=...)
+
+            return ChatResult(generations=[generation])
+
+        except Exception as e:
+            # You can raise custom errors or log here
+            raise RuntimeError(f"GenFactory call failed: {str(e)}") from e
+
+    # Optional: if you want streaming support
+    # async def _astream(...) or def _stream(...)
+    # ── see full docs for astream_chunks / token-by-token yielding ──
