@@ -365,3 +365,229 @@ class CustomGenFactoryChat(BaseChatModel):
     # Optional: if you want streaming support
     # async def _astream(...) or def _stream(...)
     # ── see full docs for astream_chunks / token-by-token yielding ──
+
+
+
+
+
+
+
+
+
+
+
+
+
+from typing import Any, Dict, Iterator, List, Optional, Union, AsyncIterator
+
+from langchain_core.callbacks import (
+    AsyncCallbackManagerForLLMRun,
+    CallbackManagerForLLMRun,
+)
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langchain_core.outputs import ChatGenerationChunk, ChatResult
+from langchain_core.pydantic_v1 import Field
+
+import httpx
+import json
+
+
+class CustomGenFactoryChat(BaseChatModel):
+    """
+    Custom chat model for GenFactory endpoint with sync + async streaming support.
+    Assumes OpenAI-compatible /chat/completions streaming format.
+    """
+
+    base_url: str = Field(..., description="Base URL of the API")
+    api_key: str = Field(..., description="API key (if required)")
+    model_name: str = Field(..., alias="model")
+
+    temperature: float = 0.2
+    max_tokens: Optional[int] = 2048
+
+    default_system: Optional[str] = None
+
+    http_client: Optional[httpx.Client] = None
+    async_http_client: Optional[httpx.AsyncClient] = None
+
+    def __init__(self, **data: Any):
+        super().__init__(**data)
+        if self.http_client is None:
+            self.http_client = httpx.Client(
+                timeout=httpx.Timeout(60.0, connect=15.0, read=120.0)
+            )
+        if self.async_http_client is None:
+            self.async_http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(60.0, connect=15.0, read=120.0)
+            )
+
+    @property
+    def _llm_type(self) -> str:
+        return "genfactory-custom-chat"
+
+    @property
+    def _identifying_params(self) -> Dict[str, Any]:
+        return {
+            "model": self.model_name,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "base_url": self.base_url,
+        }
+
+    def _create_payload(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        stream: bool = False,
+        **kwargs: Any,
+    ) -> Dict:
+        payload_messages = []
+
+        if self.default_system:
+            payload_messages.append({"role": "system", "content": self.default_system})
+
+        for msg in messages:
+            if isinstance(msg, SystemMessage):
+                role = "system"
+            elif isinstance(msg, HumanMessage):
+                role = "user"
+            elif isinstance(msg, AIMessage):
+                role = "assistant"
+            elif isinstance(msg, ToolMessage):
+                role = "tool"
+            else:
+                role = "user"
+
+            payload_messages.append({"role": role, "content": msg.content})
+
+        payload = {
+            "model": self.model_name,
+            "messages": payload_messages,
+            "temperature": kwargs.get("temperature", self.temperature),
+            "max_tokens": kwargs.get("max_tokens", self.max_tokens),
+            "stream": stream,
+        }
+
+        if stop:
+            payload["stop"] = stop
+
+        return payload
+
+    def _parse_chunk(self, line: str) -> Optional[AIMessageChunk]:
+        """Parse a single SSE line into an AIMessageChunk"""
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            return None
+
+        try:
+            data = json.loads(line[6:].strip())
+            delta = data.get("choices", [{}])[0].get("delta", {})
+            content = delta.get("content", "")
+            # tool_calls = delta.get("tool_calls")   # add later if needed
+
+            if content:
+                return AIMessageChunk(content=content)
+            return None
+        except Exception:
+            return None
+
+    def _stream(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        payload = self._create_payload(messages, stop=stop, stream=True, **kwargs)
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        }
+
+        with self.http_client.stream(
+            "POST",
+            f"{self.base_url.rstrip('/')}/chat/completions",
+            json=payload,
+            headers=headers,
+        ) as response:
+            response.raise_for_status()
+
+            for line in response.iter_lines():
+                if line:
+                    chunk = self._parse_chunk(line.decode("utf-8"))
+                    if chunk:
+                        yield ChatGenerationChunk(message=chunk)
+                        if run_manager:
+                            run_manager.on_llm_new_token(chunk.content)
+
+    async def _astream(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        payload = self._create_payload(messages, stop=stop, stream=True, **kwargs)
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        }
+
+        async with self.async_http_client.stream(
+            "POST",
+            f"{self.base_url.rstrip('/')}/chat/completions",
+            json=payload,
+            headers=headers,
+        ) as response:
+            response.raise_for_status()
+
+            async for line in response.aiter_lines():
+                if line:
+                    chunk = self._parse_chunk(line.decode("utf-8"))
+                    if chunk:
+                        yield ChatGenerationChunk(message=chunk)
+                        if run_manager:
+                            await run_manager.on_llm_new_token(chunk.content)
+
+    def _generate(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        # Non-streaming version (falls back to collecting stream if needed)
+        payload = self._create_payload(messages, stop=stop, stream=False, **kwargs)
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        response = self.http_client.post(
+            f"{self.base_url.rstrip('/')}/chat/completions",
+            json=payload,
+            headers=headers,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        # Adjust path according to your real response shape
+        content = data["choices"][0]["message"]["content"]
+
+        message = AIMessage(content=content)
+        generation = ChatGeneration(message=message)
+
+        return ChatResult(generations=[generation])
+
